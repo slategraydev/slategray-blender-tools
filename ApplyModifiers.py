@@ -53,12 +53,22 @@ def _isolate_and_extract_mesh_data(
     reference_vert_count = -1
     coord_buffer: np.ndarray | None = None
 
-    for i in range(total_shapes):
-        for j, kb in enumerate(key_blocks):
-            kb.value = 1.0 if i == j else 0.0
-            kb.mute = i != j
+    # Performance Optimization: Cache initial state to minimize RNA sets
+    # We mute all keys once, then toggle only the active one in the loop.
+    for kb in key_blocks:
+        kb.mute = True
+        kb.value = 0.0
 
-        context.view_layer.update()
+    for i in range(total_shapes):
+        kb = key_blocks[i]
+        kb.mute = False
+        kb.value = 1.0
+
+        # Optimization: Use targeted depsgraph update instead of full scene update.
+        # This prevents redundant evaluation of unrelated objects in complex scenes.
+        ob.update_tag()
+        depsgraph.update()
+
         eval_obj = ob.evaluated_get(depsgraph)
         temp_mesh = eval_obj.to_mesh()
 
@@ -75,6 +85,10 @@ def _isolate_and_extract_mesh_data(
             coords_collection.append(coord_buffer.copy())
 
         eval_obj.to_mesh_clear()
+
+        # Reset for next iteration
+        kb.mute = True
+        kb.value = 0.0
 
     return reference_vert_count, coords_collection
 
@@ -146,7 +160,10 @@ def _execute_vectorized_bake(
         return True, None
 
     serialized_keys = [
-        {**{attr: getattr(kb, attr) for attr in SHAPE_ATTRIBUTES}, "rel": kb.relative_key.name}
+        {
+            **{attr: getattr(kb, attr) for attr in SHAPE_ATTRIBUTES},
+            "rel": kb.relative_key.name if kb.relative_key else kb.name,
+        }
         for kb in mesh_data.shape_keys.key_blocks
     ]
 
@@ -164,6 +181,7 @@ def _execute_vectorized_bake(
                 m.show_viewport = original_vis[m.name]
         for idx, kb in enumerate(mesh_data.shape_keys.key_blocks):
             kb.value, kb.mute = original_state[idx]
+        context.view_layer.update()
 
     _bake_and_rebuild(ob, target_modifiers, serialized_keys, baked_coords)
 
