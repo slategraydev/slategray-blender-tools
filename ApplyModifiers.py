@@ -5,7 +5,6 @@
 """High-performance Blender addon to bake modifiers using NumPy vectorization."""
 
 import time
-from typing import Any
 
 import bpy  # type: ignore
 import numpy as np
@@ -21,13 +20,13 @@ bl_info = {
     "name": "Apply Modifiers",
     "author": "Randall Rosas (Slategray)",
     "blender": (5, 0, 0),
-    "version": (1, 0, 0),
+    "version": "1.0.0",
     "location": "Object > Context Menu",
     "description": "Bakes modifiers while preserving shape keys using NumPy vectorization.",
     "category": "Object",
 }
 
-# --- Configuration & State ---
+# --- Configuration & Constants ---
 
 
 class MSK_ModifierItem(bpy.types.PropertyGroup):
@@ -37,8 +36,6 @@ class MSK_ModifierItem(bpy.types.PropertyGroup):
     mod_name: StringProperty()  # type: ignore
     is_selected: BoolProperty(name="Apply", default=True)  # type: ignore
 
-
-MAX_MODIFIERS = 32
 
 SHAPE_ATTRIBUTES = (
     "interpolation",
@@ -50,7 +47,41 @@ SHAPE_ATTRIBUTES = (
     "vertex_group",
 )
 
-# --- High-Performance Mesh Processing ---
+# --- Private Utilities: Data Capture ---
+
+
+def _capture_mesh_metadata(
+    mesh_data: bpy.types.Mesh,
+) -> tuple[list[dict], list[tuple[float, bool]]]:
+    """Record shape key metadata and current state."""
+    if not mesh_data.shape_keys:
+        return [], []
+
+    key_blocks = mesh_data.shape_keys.key_blocks
+    metadata = [
+        {
+            **{a: getattr(kb, a) for a in SHAPE_ATTRIBUTES},
+            "rel": kb.relative_key.name if kb.relative_key else kb.name,
+        }
+        for kb in key_blocks
+    ]
+    original_state = [(kb.value, kb.mute) for kb in key_blocks]
+    return metadata, original_state
+
+
+def _capture_modifier_stack(ob: bpy.types.Object) -> list[dict]:
+    """Capture a snapshot of the entire modifier stack."""
+    snaps = []
+    for m in ob.modifiers:
+        snap = {"name": m.name, "type": m.type, "show_viewport": m.show_viewport}
+        for p in m.bl_rna.properties:
+            if not p.is_readonly and p.identifier not in {"name", "type"}:
+                snap[p.identifier] = getattr(m, p.identifier)
+        snaps.append(snap)
+    return snaps
+
+
+# --- Private Utilities: Extraction ---
 
 
 def _isolate_and_extract_mesh_data(
@@ -64,21 +95,15 @@ def _isolate_and_extract_mesh_data(
     total_shapes = len(key_blocks)
 
     reference_vert_count = -1
-    coord_buffer: np.ndarray | None = None
+    coord_buffer = None
 
-    # Performance Optimization: Cache initial state to minimize RNA sets
-    # We mute all keys once, then toggle only the active one in the loop.
     for kb in key_blocks:
-        kb.mute = True
-        kb.value = 0.0
+        kb.mute, kb.value = True, 0.0
 
     for i in range(total_shapes):
         kb = key_blocks[i]
-        kb.mute = False
-        kb.value = 1.0
+        kb.mute, kb.value = False, 1.0
 
-        # Optimization: Use targeted depsgraph update instead of full scene update.
-        # This prevents redundant evaluation of unrelated objects in complex scenes.
         ob.update_tag()
         depsgraph.update()
 
@@ -91,230 +116,297 @@ def _isolate_and_extract_mesh_data(
             coord_buffer = np.empty(reference_vert_count * 3, dtype=np.float32)
         elif current_count != reference_vert_count:
             eval_obj.to_mesh_clear()
-            return None, "Topology mismatch detected during bake."
+            return None, "Topology mismatch detected."
 
         if coord_buffer is not None:
             temp_mesh.vertices.foreach_get("co", coord_buffer)
             coords_collection.append(coord_buffer.copy())
 
         eval_obj.to_mesh_clear()
-
-        # Reset for next iteration
-        kb.mute = True
-        kb.value = 0.0
+        kb.mute, kb.value = True, 0.0
 
     return reference_vert_count, coords_collection
 
 
-def _rebuild_geometry_stack(
+def _extract_mesh_data_world(
     ob: bpy.types.Object,
-    metadata: list[dict[str, Any]],
-    baked_data: list[np.ndarray],
-) -> None:
-    """Restore shape keys using vectorized NumPy data."""
-    for i, meta in enumerate(metadata):
-        new_kb = ob.shape_key_add(name=meta["name"], from_mix=False)
-        new_kb.data.foreach_set("co", baked_data[i])
-        for attr in SHAPE_ATTRIBUTES:
-            if attr != "name":
-                setattr(new_kb, attr, meta[attr])
-
-    key_blocks = ob.data.shape_keys.key_blocks
-    for i, meta in enumerate(metadata):
-        rel_target = meta["rel"]
-        if rel_target in key_blocks:
-            key_blocks[i].relative_key = key_blocks[rel_target]
-
-
-# --- Logic Coordination ---
-
-
-def _configure_stack_visibility(
-    ob: bpy.types.Object,
+    context: bpy.types.Context,
     target_modifiers: list[str],
-) -> dict[str, bool]:
-    """Configure modifier visibility and return original state."""
-    original_vis = {m.name: m.show_viewport for m in ob.modifiers}
+) -> tuple[list[dict], list[np.ndarray]] | tuple[None, str]:
+    """Capture vertex coordinates in WORLD SPACE to stabilize against transform issues."""
+    mesh_data = ob.data
+    matrix_world = np.array(ob.matrix_world)
+    metadata, original_state = _capture_mesh_metadata(mesh_data)
+
+    # Configure visibility
+    orig_vis = {m.name: m.show_viewport for m in ob.modifiers}
     for m in ob.modifiers:
         m.show_viewport = m.name in target_modifiers
-    return original_vis
-
-
-def _bake_and_rebuild(
-    ob: bpy.types.Object,
-    target_modifiers: list[str],
-    metadata: list[dict[str, Any]],
-    baked_coords: list[np.ndarray],
-) -> None:
-    """Apply modifiers and rebuild the vectorized shape key stack."""
-    bpy.ops.object.shape_key_remove(all=True)
-    for mod_name in target_modifiers:
-        if mod_name in ob.modifiers:
-            bpy.ops.object.modifier_apply(modifier=mod_name)
-    _rebuild_geometry_stack(ob, metadata, baked_coords)
-
-
-def _execute_vectorized_bake(
-    context: bpy.types.Context,
-    ob: bpy.types.Object,
-    target_modifiers: list[str],
-) -> tuple[bool, str | None]:
-    """Orchestrates the high-performance bake pipeline."""
-    if not ob or ob.type != "MESH":
-        return False, "Active object must be a mesh."
-
-    timer_start = time.time()
-    mesh_data = ob.data
-
-    if not mesh_data.shape_keys:
-        for mod_name in target_modifiers:
-            if mod_name in ob.modifiers:
-                bpy.ops.object.modifier_apply(modifier=mod_name)
-        return True, None
-
-    serialized_keys = [
-        {
-            **{attr: getattr(kb, attr) for attr in SHAPE_ATTRIBUTES},
-            "rel": kb.relative_key.name if kb.relative_key else kb.name,
-        }
-        for kb in mesh_data.shape_keys.key_blocks
-    ]
-
-    original_vis = _configure_stack_visibility(ob, target_modifiers)
-    original_state = [(kb.value, kb.mute) for kb in mesh_data.shape_keys.key_blocks]
 
     try:
-        res = _isolate_and_extract_mesh_data(ob, context)
-        if res[0] is None:
-            return False, str(res[1])
-        _, baked_coords = res
+        if not mesh_data.shape_keys:
+            deps = context.evaluated_depsgraph_get()
+            ob.update_tag()
+            deps.update()
+            eval_ob = ob.evaluated_get(deps)
+            temp = eval_ob.to_mesh()
+            buf = np.empty(len(temp.vertices) * 3, dtype=np.float32)
+            temp.vertices.foreach_get("co", buf)
+            coords_local = [buf]
+            eval_ob.to_mesh_clear()
+        else:
+            res = _isolate_and_extract_mesh_data(ob, context)
+            if res[0] is None:
+                return None, str(res[1])
+            _, coords_local = res
+
+        # World-Space stabilization
+        coords_world = []
+        for c in coords_local:
+            v = np.reshape(c, (-1, 3))
+            vh = np.c_[v, np.ones(len(v))]
+            coords_world.append((matrix_world @ vh.T).T[:, :3].astype(np.float32))
+
+        return metadata, coords_world
+
     finally:
+        # Restore state
         for m in ob.modifiers:
-            if m.name in original_vis:
-                m.show_viewport = original_vis[m.name]
-        for idx, kb in enumerate(mesh_data.shape_keys.key_blocks):
-            kb.value, kb.mute = original_state[idx]
+            if m.name in orig_vis:
+                m.show_viewport = orig_vis[m.name]
+        if mesh_data.shape_keys:
+            for i, (val, mute) in enumerate(original_state):
+                (
+                    mesh_data.shape_keys.key_blocks[i].value,
+                    mesh_data.shape_keys.key_blocks[i].mute,
+                ) = (
+                    val,
+                    mute,
+                )
         context.view_layer.update()
 
-    _bake_and_rebuild(ob, target_modifiers, serialized_keys, baked_coords)
 
-    print(f"Vectorized bake finished in {time.time() - timer_start:.4f}s")
-    return True, None
+# --- Private Utilities: Restoration ---
 
 
-# --- UI: Operator ---
+def _restore_geometry(ob: bpy.types.Object, metadata: list[dict], coords_world: list[np.ndarray]):
+    """Update base mesh and rebuild shape keys."""
+    inv_mat = np.array(ob.matrix_world.inverted())
+    coords_local = []
+    for cw in coords_world:
+        vh = np.c_[cw, np.ones(len(cw))]
+        coords_local.append(((inv_mat @ vh.T).T[:, :3]).flatten().astype(np.float32))
+
+    ob.data.vertices.foreach_set("co", coords_local[0])
+
+    if metadata:
+        for i, meta in enumerate(metadata):
+            kb = ob.shape_key_add(name=meta["name"], from_mix=False)
+            kb.data.foreach_set("co", coords_local[i])
+            for attr in SHAPE_ATTRIBUTES:
+                if attr != "name":
+                    setattr(kb, attr, meta[attr])
+
+        blocks = ob.data.shape_keys.key_blocks
+        for i, meta in enumerate(metadata):
+            rel = meta["rel"]
+            if rel in blocks:
+                blocks[i].relative_key = blocks[rel]
 
 
-class MSK_OT_BakeVectorized(bpy.types.Operator):
-    """Bake modifiers with high-performance NumPy vectorization."""
+def _restore_modifier_stack(
+    ob: bpy.types.Object, snaps: list[dict], sel_set: set[str], keep_arms: bool
+):
+    """Rebuild the modifier stack from snapshots."""
+    for snap in snaps:
+        is_baked = snap["name"] in sel_set
+        is_arm = snap["type"] == "ARMATURE"
+        hidden = not snap["show_viewport"]
+        if (not is_baked) or hidden or (is_arm and keep_arms):
+            new_mod = ob.modifiers.new(name=snap["name"], type=snap["type"])
+            for key, val in snap.items():
+                if key not in {"name", "type"}:
+                    try:
+                        setattr(new_mod, key, val)
+                    except Exception:
+                        pass
 
-    bl_idname = "object.msk_bake_vectorized"
+
+def _restore_object_clean(
+    ob: bpy.types.Object,
+    metadata: list[dict],
+    coords_world: list[np.ndarray],
+    snaps: list[dict],
+    sel_mods: list[str],
+    keep_arms: bool,
+) -> None:
+    """Wipe and reconstruct object against the new world state."""
+    if ob.data.shape_keys:
+        for kb in reversed(ob.data.shape_keys.key_blocks):
+            ob.shape_key_remove(kb)
+    ob.modifiers.clear()
+
+    _restore_geometry(ob, metadata, coords_world)
+    _restore_modifier_stack(ob, snaps, set(sel_mods), keep_arms)
+
+
+# --- Private Utilities: Rigging ---
+
+
+def _force_sync_rig(context: bpy.types.Context, arm: bpy.types.Object) -> None:
+    """Forcefully apply rest pose to the armature."""
+    if not arm or arm.type != "ARMATURE" or arm.library:
+        return
+
+    was_hidden = arm.hide_viewport
+    arm.hide_viewport = False
+    orig_active = context.view_layer.objects.active
+    context.view_layer.objects.active = arm
+    orig_mode = arm.mode
+
+    try:
+        if arm.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.mode_set(mode="POSE")
+        bpy.ops.pose.select_all(action="SELECT")
+        bpy.ops.pose.armature_apply()
+    except Exception as e:
+        print(f"Apply Modifiers: Rig sync failed for '{arm.name}': {e}")
+    finally:
+        try:
+            if arm.mode != orig_mode:
+                bpy.ops.object.mode_set(mode=orig_mode)
+        except Exception:
+            pass
+        context.view_layer.objects.active = orig_active
+        arm.hide_viewport = was_hidden
+
+
+# --- UI: Operators ---
+
+
+class MSK_OT_ApplyModifiers(bpy.types.Operator):
+    """Bake and remove modifiers while preserving shape keys."""
+
+    bl_idname = "object.msk_apply_modifiers"
     bl_label = "Apply Modifiers"
     bl_options = {"REGISTER", "UNDO"}
 
     modifier_items: CollectionProperty(type=MSK_ModifierItem)  # type: ignore
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        """Run vectorized bake execution."""
-        if not self.modifier_items:
-            return {"CANCELLED"}
-
-        # Store initial state
-        original_active = context.view_layer.objects.active
-        original_selected = list(context.selected_objects)
-
-        # Group selections by object name
+        """Apply selected modifiers across the selection."""
+        timer_start = time.time()
         groups: dict[str, list[str]] = {}
         for item in self.modifier_items:
             if item.is_selected:
                 groups.setdefault(item.obj_name, []).append(item.mod_name)
-
         if not groups:
-            self.report({"WARNING"}, "No modifiers selected for bake.")
             return {"CANCELLED"}
 
-        # Process each object
-        for obj_name, selected_mods in groups.items():
-            ob = bpy.data.objects.get(obj_name)
-            if not ob or ob.type != "MESH":
+        orig_active = context.view_layer.objects.active
+        orig_selected = list(context.selected_objects)
+
+        for name, mods in groups.items():
+            ob = bpy.data.objects.get(name)
+            if not ob:
                 continue
 
-            # Switch active object context
+            snaps = _capture_modifier_stack(ob)
             context.view_layer.objects.active = ob
-            success, error = _execute_vectorized_bake(context, ob, selected_mods)
-            if not success:
-                self.report({"ERROR"}, f"Bake failed for '{obj_name}': {error}")
-                continue
+            res = _extract_mesh_data_world(ob, context, mods)
+            if res[0] is not None:
+                _restore_object_clean(ob, res[0], res[1], snaps, mods, False)
 
-        # Restore original state
-        context.view_layer.objects.active = original_active
-        for ob in original_selected:
-            ob.select_set(True)
+        context.view_layer.objects.active = orig_active
+        for o in orig_selected:
+            o.select_set(True)
 
+        print(f"Bake finished in {time.time() - timer_start:.4f}s")
         return {"FINISHED"}
 
-    def draw(self, context: bpy.types.Context) -> None:
-        """Render dialogue and redo panel."""
-        layout = self.layout
-        layout.label(text="Select modifiers to bake per object:")
-
-        last_obj = ""
-        box = None
-        armature_selected = False
-
-        for item in self.modifier_items:
-            if item.obj_name != last_obj:
-                last_obj = item.obj_name
-                layout.label(text=f"Object: {last_obj}", icon="OBJECT_DATA")
-                box = layout.box()
-
-            if box:
-                row = box.row()
-                row.prop(item, "is_selected", text=item.mod_name, icon="MODIFIER", toggle=True)
-
-                # Check for armature warning
-                if item.is_selected:
-                    ob = bpy.data.objects.get(item.obj_name)
-                    if ob:
-                        mod = ob.modifiers.get(item.mod_name)
-                        if mod and mod.type == "ARMATURE":
-                            armature_selected = True
-
-        if armature_selected:
-            col = layout.column(align=True)
-            col.alert = True
-            col.label(text="Warning: Armature selected.", icon="ERROR")
-            col.label(text="This will bake the current pose.")
-
     def invoke(self, context: bpy.types.Context, _event: bpy.types.Event) -> set[str]:
-        """Initialize selection based on current viewport visibility."""
+        """Initialize selection dialog based on viewport visibility."""
         self.modifier_items.clear()
-
-        # Populate with all selected mesh objects
-        found_any = False
+        found = False
         for ob in context.selected_objects:
-            if ob.type != "MESH":
-                continue
+            if ob.type == "MESH":
+                for m in ob.modifiers:
+                    item = self.modifier_items.add()
+                    item.obj_name, item.mod_name, item.is_selected = (
+                        ob.name,
+                        m.name,
+                        m.show_viewport,
+                    )
+                    found = True
+        if not found:
+            return {"CANCELLED"}
+        return context.window_manager.invoke_props_dialog(self, width=400)
 
-            for mod in ob.modifiers:
-                item = self.modifier_items.add()
-                item.obj_name = ob.name
-                item.mod_name = mod.name
-                item.is_selected = mod.show_viewport
-                found_any = True
+    def draw(self, context: bpy.types.Context) -> None:
+        """Render dialogue UI grouped by object."""
+        last = ""
+        for item in self.modifier_items:
+            if item.obj_name != last:
+                last = item.obj_name
+                self.layout.label(text=f"Object: {last}", icon="OBJECT_DATA")
+                box = self.layout.box()
+            box.prop(item, "is_selected", text=item.mod_name, icon="MODIFIER", toggle=True)
 
-        if not found_any:
-            self.report({"WARNING"}, "No modifiers found on selected mesh objects.")
+
+class MSK_OT_ApplyRestPose(bpy.types.Operator):
+    """Bake pose, update rest pose, and re-apply modifiers."""
+
+    bl_idname = "object.msk_apply_rest_pose"
+    bl_label = "Apply Rest Pose"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        """Perform one-click rig sync and mesh restoration."""
+        timer_start = time.time()
+        obs = [o for o in context.selected_objects if o.type == "MESH"]
+        if not obs:
             return {"CANCELLED"}
 
-        return context.window_manager.invoke_props_dialog(self, width=400)
+        orig_active = context.view_layer.objects.active
+        orig_selected = list(context.selected_objects)
+
+        data_map = {}
+        armatures = set()
+        for ob in obs:
+            snaps = _capture_modifier_stack(ob)
+            mods = [m.name for m in ob.modifiers if m.show_viewport]
+            for m in ob.modifiers:
+                if m.type == "ARMATURE" and m.object:
+                    armatures.add(m.object)
+
+            context.view_layer.objects.active = ob
+            res = _extract_mesh_data_world(ob, context, mods)
+            if res[0] is not None:
+                data_map[ob.name] = (res[0], res[1], snaps, mods)
+
+        for arm in armatures:
+            _force_sync_rig(context, arm)
+        context.view_layer.update()
+
+        for name, (meta, coords, snaps, mods) in data_map.items():
+            ob = bpy.data.objects.get(name)
+            if ob:
+                _restore_object_clean(ob, meta, coords, snaps, mods, True)
+
+        context.view_layer.objects.active = orig_active
+        for o in orig_selected:
+            o.select_set(True)
+
+        print(f"Rest pose sync finished in {time.time() - timer_start:.4f}s")
+        return {"FINISHED"}
 
 
 # --- UI: Panel ---
 
 
 class MSK_PT_SidebarPanel(bpy.types.Panel):
-    """Sidebar Panel."""
+    """Sidebar Panel for quick access to bake tools."""
 
     bl_idname = "MSK_PT_SidebarPanel"
     bl_label = "Apply Modifiers"
@@ -323,27 +415,29 @@ class MSK_PT_SidebarPanel(bpy.types.Panel):
     bl_category = "Tool"
 
     def draw(self, context: bpy.types.Context) -> None:
-        """Render UI button."""
-        self.layout.operator(MSK_OT_BakeVectorized.bl_idname, icon="RECOVER_LAST")
+        """Render main action buttons."""
+        self.layout.operator(MSK_OT_ApplyModifiers.bl_idname, icon="RECOVER_LAST")
+        self.layout.operator(MSK_OT_ApplyRestPose.bl_idname, icon="ARMATURE_DATA")
 
 
 # --- Registration ---
 
 CLASSES = (
     MSK_ModifierItem,
-    MSK_OT_BakeVectorized,
+    MSK_OT_ApplyModifiers,
+    MSK_OT_ApplyRestPose,
     MSK_PT_SidebarPanel,
 )
 
 
 def register() -> None:
-    """Register addon."""
+    """Register all addon classes."""
     for cls in CLASSES:
         bpy.utils.register_class(cls)
 
 
 def unregister() -> None:
-    """Unregister addon."""
+    """Unregister all addon classes."""
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
 
