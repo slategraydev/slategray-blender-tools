@@ -9,7 +9,11 @@ from typing import Any
 
 import bpy  # type: ignore
 import numpy as np
-from bpy.props import BoolVectorProperty  # type: ignore
+from bpy.props import (  # type: ignore
+    BoolProperty,
+    CollectionProperty,
+    StringProperty,
+)
 
 # --- Addon Definition ---
 
@@ -24,6 +28,15 @@ bl_info = {
 }
 
 # --- Configuration & State ---
+
+
+class MSK_ModifierItem(bpy.types.PropertyGroup):
+    """Storage for individual modifier selection across multiple objects."""
+
+    obj_name: StringProperty()  # type: ignore
+    mod_name: StringProperty()  # type: ignore
+    is_selected: BoolProperty(name="Apply", default=True)  # type: ignore
+
 
 MAX_MODIFIERS = 32
 
@@ -143,10 +156,10 @@ def _bake_and_rebuild(
 
 def _execute_vectorized_bake(
     context: bpy.types.Context,
+    ob: bpy.types.Object,
     target_modifiers: list[str],
 ) -> tuple[bool, str | None]:
     """Orchestrates the high-performance bake pipeline."""
-    ob = context.object
     if not ob or ob.type != "MESH":
         return False, "Active object must be a mesh."
 
@@ -199,60 +212,73 @@ class MSK_OT_BakeVectorized(bpy.types.Operator):
     bl_label = "Apply Modifiers"
     bl_options = {"REGISTER", "UNDO"}
 
-    selected_modifiers: BoolVectorProperty(  # type: ignore
-        name="Selected Modifiers",
-        size=MAX_MODIFIERS,
-        default=(True,) * MAX_MODIFIERS,
-    )
+    modifier_items: CollectionProperty(type=MSK_ModifierItem)  # type: ignore
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         """Run vectorized bake execution."""
-        ob = context.object
-        if not ob:
+        if not self.modifier_items:
             return {"CANCELLED"}
 
-        all_mods = [m.name for m in ob.modifiers]
-        selected = [
-            name
-            for i, name in enumerate(all_mods)
-            if i < MAX_MODIFIERS and self.selected_modifiers[i]
-        ]
+        # Store initial state
+        original_active = context.view_layer.objects.active
+        original_selected = list(context.selected_objects)
 
-        if not selected:
+        # Group selections by object name
+        groups: dict[str, list[str]] = {}
+        for item in self.modifier_items:
+            if item.is_selected:
+                groups.setdefault(item.obj_name, []).append(item.mod_name)
+
+        if not groups:
             self.report({"WARNING"}, "No modifiers selected for bake.")
             return {"CANCELLED"}
 
-        success, error = _execute_vectorized_bake(context, selected)
-        if not success:
-            self.report({"ERROR"}, error if error else "Bake failed.")
-            return {"CANCELLED"}
+        # Process each object
+        for obj_name, selected_mods in groups.items():
+            ob = bpy.data.objects.get(obj_name)
+            if not ob or ob.type != "MESH":
+                continue
+
+            # Switch active object context
+            context.view_layer.objects.active = ob
+            success, error = _execute_vectorized_bake(context, ob, selected_mods)
+            if not success:
+                self.report({"ERROR"}, f"Bake failed for '{obj_name}': {error}")
+                continue
+
+        # Restore original state
+        context.view_layer.objects.active = original_active
+        for ob in original_selected:
+            ob.select_set(True)
 
         return {"FINISHED"}
 
     def draw(self, context: bpy.types.Context) -> None:
         """Render dialogue and redo panel."""
-        ob = context.object
-        if not ob:
-            return
-
         layout = self.layout
-        layout.label(text="Select modifiers to bake:")
+        layout.label(text="Select modifiers to bake per object:")
 
-        box = layout.box()
+        last_obj = ""
+        box = None
         armature_selected = False
 
-        for i, mod in enumerate(ob.modifiers):
-            if i >= MAX_MODIFIERS:
-                break
+        for item in self.modifier_items:
+            if item.obj_name != last_obj:
+                last_obj = item.obj_name
+                layout.label(text=f"Object: {last_obj}", icon="OBJECT_DATA")
+                box = layout.box()
 
-            # Draw as toggle buttons for high-contrast selection
-            # Selected = Highlighted/Light Gray, Unselected = Flat/Dark Gray
-            box.prop(
-                self, "selected_modifiers", index=i, text=mod.name, icon="MODIFIER", toggle=True
-            )
+            if box:
+                row = box.row()
+                row.prop(item, "is_selected", text=item.mod_name, icon="MODIFIER", toggle=True)
 
-            if self.selected_modifiers[i] and mod.type == "ARMATURE":
-                armature_selected = True
+                # Check for armature warning
+                if item.is_selected:
+                    ob = bpy.data.objects.get(item.obj_name)
+                    if ob:
+                        mod = ob.modifiers.get(item.mod_name)
+                        if mod and mod.type == "ARMATURE":
+                            armature_selected = True
 
         if armature_selected:
             col = layout.column(align=True)
@@ -262,19 +288,26 @@ class MSK_OT_BakeVectorized(bpy.types.Operator):
 
     def invoke(self, context: bpy.types.Context, _event: bpy.types.Event) -> set[str]:
         """Initialize selection based on current viewport visibility."""
-        ob = context.object
-        if not ob:
+        self.modifier_items.clear()
+
+        # Populate with all selected mesh objects
+        found_any = False
+        for ob in context.selected_objects:
+            if ob.type != "MESH":
+                continue
+
+            for mod in ob.modifiers:
+                item = self.modifier_items.add()
+                item.obj_name = ob.name
+                item.mod_name = mod.name
+                item.is_selected = mod.show_viewport
+                found_any = True
+
+        if not found_any:
+            self.report({"WARNING"}, "No modifiers found on selected mesh objects.")
             return {"CANCELLED"}
 
-        # Initialize the vector based on current visibility
-        temp_selection = [False] * MAX_MODIFIERS
-        for i, mod in enumerate(ob.modifiers):
-            if i < MAX_MODIFIERS:
-                temp_selection[i] = mod.show_viewport
-
-        self.selected_modifiers = tuple(temp_selection)
-
-        return context.window_manager.invoke_props_dialog(self)
+        return context.window_manager.invoke_props_dialog(self, width=400)
 
 
 # --- UI: Panel ---
@@ -297,6 +330,7 @@ class MSK_PT_SidebarPanel(bpy.types.Panel):
 # --- Registration ---
 
 CLASSES = (
+    MSK_ModifierItem,
     MSK_OT_BakeVectorized,
     MSK_PT_SidebarPanel,
 )
