@@ -9,7 +9,7 @@ from typing import Any
 
 import bpy  # type: ignore
 import numpy as np
-from bpy.props import BoolProperty, CollectionProperty  # type: ignore
+from bpy.props import BoolVectorProperty  # type: ignore
 
 # --- Addon Definition ---
 
@@ -24,6 +24,8 @@ bl_info = {
 }
 
 # --- Configuration & State ---
+
+MAX_MODIFIERS = 32
 
 SHAPE_ATTRIBUTES = (
     "interpolation",
@@ -179,12 +181,27 @@ class MSK_OT_BakeVectorized(bpy.types.Operator):
     bl_label = "Apply Modifiers"
     bl_options = {"REGISTER", "UNDO"}
 
-    modifier_list: CollectionProperty(type=bpy.types.PropertyGroup)  # type: ignore
+    selected_modifiers: BoolVectorProperty(  # type: ignore
+        name="Selected Modifiers",
+        size=MAX_MODIFIERS,
+        default=(True,) * MAX_MODIFIERS,
+    )
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         """Run vectorized bake execution."""
-        selected = [m.name for m in self.modifier_list if m.name in context.object.modifiers]
+        ob = context.object
+        if not ob:
+            return {"CANCELLED"}
+
+        all_mods = [m.name for m in ob.modifiers]
+        selected = [
+            name
+            for i, name in enumerate(all_mods)
+            if i < MAX_MODIFIERS and self.selected_modifiers[i]
+        ]
+
         if not selected:
+            self.report({"WARNING"}, "No modifiers selected for bake.")
             return {"CANCELLED"}
 
         success, error = _execute_vectorized_bake(context, selected)
@@ -195,33 +212,50 @@ class MSK_OT_BakeVectorized(bpy.types.Operator):
         return {"FINISHED"}
 
     def draw(self, context: bpy.types.Context) -> None:
-        """Render dialogue."""
+        """Render dialogue and redo panel."""
         ob = context.object
+        if not ob:
+            return
+
         layout = self.layout
-        layout.label(text="Baking selected modifiers...")
+        layout.label(text="Select modifiers to bake:")
 
         box = layout.box()
         armature_selected = False
-        for item in self.modifier_list:
-            mod = ob.modifiers.get(item.name)
-            if not mod:
-                continue
-            box.label(text=item.name, icon="MODIFIER")
-            if mod.type == "ARMATURE":
+
+        for i, mod in enumerate(ob.modifiers):
+            if i >= MAX_MODIFIERS:
+                break
+
+            # Draw as toggle buttons for high-contrast selection
+            # Selected = Highlighted/Light Gray, Unselected = Flat/Dark Gray
+            box.prop(
+                self, "selected_modifiers", index=i, text=mod.name, icon="MODIFIER", toggle=True
+            )
+
+            if self.selected_modifiers[i] and mod.type == "ARMATURE":
                 armature_selected = True
 
         if armature_selected:
             col = layout.column(align=True)
+            col.alert = True
             col.label(text="Warning: Armature selected.", icon="ERROR")
             col.label(text="This will bake the current pose.")
 
     def invoke(self, context: bpy.types.Context, _event: bpy.types.Event) -> set[str]:
-        """Initialization."""
-        if not context.object:
+        """Initialize selection based on current viewport visibility."""
+        ob = context.object
+        if not ob:
             return {"CANCELLED"}
-        self.modifier_list.clear()
-        for mod in context.object.modifiers:
-            self.modifier_list.add().name = mod.name
+
+        # Initialize the vector based on current visibility
+        temp_selection = [False] * MAX_MODIFIERS
+        for i, mod in enumerate(ob.modifiers):
+            if i < MAX_MODIFIERS:
+                temp_selection[i] = mod.show_viewport
+
+        self.selected_modifiers = tuple(temp_selection)
+
         return context.window_manager.invoke_props_dialog(self)
 
 
