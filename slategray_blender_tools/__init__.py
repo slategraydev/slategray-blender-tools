@@ -1,0 +1,71 @@
+# ------------------------------------------------------------------------------
+# Copyright (c) 2026 Randall Rosas (Slategray)
+# ------------------------------------------------------------------------------
+
+"""Entry point for Slategray Blender Tools."""
+
+import importlib
+import sys
+
+from . import ui
+from .modules import apply_modifiers, apply_rest_pose
+
+# ------------------------------------------------------------------------------
+# ADDON METADATA
+# ------------------------------------------------------------------------------
+
+bl_info = {
+    "name": "Slategray Blender Tools",
+    "author": "Randall Rosas (Slategray)",
+    "blender": (3, 6, 0),
+    "version": (1, 1, 0),
+    "location": "3D View > Sidebar > SLATE",
+    "description": "A modular tool suite for mesh and rigging workflows.",
+    "category": "Object",
+}
+
+# ------------------------------------------------------------------------------
+# DYNAMIC RELOADING
+# ------------------------------------------------------------------------------
+
+MODULE_NAMES = (
+    "utils",
+    "ui",
+    "modules.apply_modifiers",
+    "modules.apply_rest_pose",
+)
+
+if "bpy" in sys.modules:
+    for name in MODULE_NAMES:
+        full_name = f"{__package__}.{name}" if __package__ else name
+        if full_name in sys.modules:
+            importlib.reload(sys.modules[full_name])
+
+
+# ------------------------------------------------------------------------------
+# REGISTRATION
+# ------------------------------------------------------------------------------
+
+MODULES = (
+    ui,
+    apply_modifiers,
+    apply_rest_pose,
+)
+
+
+def register() -> None:
+    """Register all modular components."""
+    for mod in MODULES:
+        if hasattr(mod, "register"):
+            mod.register()
+
+
+def unregister() -> None:
+    """Unregister all modular components."""
+    for mod in reversed(MODULES):
+        if hasattr(mod, "unregister"):
+            mod.unregister()
+
+
+if __name__ == "__main__":
+    register()

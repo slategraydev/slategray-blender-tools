@@ -9,6 +9,10 @@ from typing import Any
 import bpy  # type: ignore
 import numpy as np
 
+# ------------------------------------------------------------------------------
+# GLOBAL CONSTANTS
+# ------------------------------------------------------------------------------
+
 SHAPE_ATTRIBUTES = (
     "interpolation",
     "mute",
@@ -18,6 +22,11 @@ SHAPE_ATTRIBUTES = (
     "value",
     "vertex_group",
 )
+
+
+# ------------------------------------------------------------------------------
+# DATA EXTRACTION
+# ------------------------------------------------------------------------------
 
 
 def extract_mesh_data(
@@ -33,7 +42,6 @@ def extract_mesh_data(
     reference_vert_count = -1
     coord_buffer = None
 
-    # Performance Optimization: Mute all shapes once to isolate states
     original_state = [(kb.value, kb.mute) for kb in key_blocks]
     for kb in key_blocks:
         kb.mute, kb.value = True, 0.0
@@ -64,7 +72,6 @@ def extract_mesh_data(
             eval_obj.to_mesh_clear()
             kb.mute, kb.value = True, 0.0
     finally:
-        # Always restore original state
         for idx, (val, mute) in enumerate(original_state):
             key_blocks[idx].value, key_blocks[idx].mute = val, mute
 
@@ -80,32 +87,64 @@ def get_modifier_snapshot(mod: bpy.types.Modifier) -> dict[str, Any]:
     return snapshot
 
 
-def restore_object(
+def capture_mesh_snapshot(
     ob: bpy.types.Object,
-    metadata: list[dict],
-    baked_coords: list[np.ndarray],
-    stack_snapshots: list[dict],
-    selected_mods: list[str],
-    keep_armatures: bool,
-) -> None:
-    """Wipe object and reconstruct mesh/modifiers from snapshots."""
-    # 1. Clear Data
+    context: bpy.types.Context,
+) -> tuple[list[dict], list[np.ndarray]] | tuple[None, None]:
+    """Capture shape key metadata and vertex coordinates for an object."""
+    if ob.data.shape_keys:
+        meta = [
+            {
+                **{a: getattr(kb, a) for a in SHAPE_ATTRIBUTES},
+                "rel": kb.relative_key.name if kb.relative_key else kb.name,
+            }
+            for kb in ob.data.shape_keys.key_blocks
+        ]
+        res = extract_mesh_data(ob, context)
+        if res[0] is None:
+            return None, None
+        _, coords = res
+    else:
+        meta = []
+        deps = context.evaluated_depsgraph_get()
+        ob.update_tag()
+        deps.update()
+        eval_ob = ob.evaluated_get(deps)
+        temp = eval_ob.to_mesh()
+        buf = np.empty(len(temp.vertices) * 3, dtype=np.float32)
+        temp.vertices.foreach_get("co", buf)
+        coords = [buf]
+        eval_ob.to_mesh_clear()
+
+    return meta, coords
+
+
+# ------------------------------------------------------------------------------
+# OBJECT RECONSTRUCTION
+# ------------------------------------------------------------------------------
+
+
+def _clear_object_data(ob: bpy.types.Object) -> None:
+    """Wipe all shape keys and modifiers from the object."""
     if ob.data.shape_keys:
         for kb in reversed(ob.data.shape_keys.key_blocks):
             ob.shape_key_remove(kb)
     ob.modifiers.clear()
 
-    # 2. Restore Geometry
-    ob.data.vertices.foreach_set("co", baked_coords[0])
 
-    # 3. Restore Stack
+def _restore_modifier_stack(
+    ob: bpy.types.Object,
+    stack_snapshots: list[dict],
+    selected_mods: list[str],
+    keep_armatures: bool,
+) -> None:
+    """Reconstruct the modifier stack from snapshots."""
     sel_set = set(selected_mods)
     for snap in stack_snapshots:
         is_baked = snap["name"] in sel_set
         is_arm = snap["type"] == "ARMATURE"
         hidden = not snap["show_viewport"]
 
-        # Keep if: not selected to bake OR hidden OR it's an armature and we're syncing rig
         if (not is_baked) or hidden or (is_arm and keep_armatures):
             new_mod = ob.modifiers.new(name=snap["name"], type=snap["type"])
             for key, val in snap.items():
@@ -115,7 +154,13 @@ def restore_object(
                     except Exception:
                         pass
 
-    # 4. Restore Shape Keys
+
+def _restore_shape_keys(
+    ob: bpy.types.Object,
+    metadata: list[dict],
+    baked_coords: list[np.ndarray],
+) -> None:
+    """Reconstruct shape keys from snapshots."""
     for i, meta in enumerate(metadata):
         kb = ob.shape_key_add(name=meta["name"], from_mix=False)
         kb.data.foreach_set("co", baked_coords[i])
@@ -129,6 +174,26 @@ def restore_object(
             rel = meta["rel"]
             if rel in blocks:
                 blocks[i].relative_key = blocks[rel]
+
+
+def restore_object(
+    ob: bpy.types.Object,
+    metadata: list[dict],
+    baked_coords: list[np.ndarray],
+    stack_snapshots: list[dict],
+    selected_mods: list[str],
+    keep_armatures: bool,
+) -> None:
+    """Wipe object and reconstruct mesh/modifiers from snapshots."""
+    _clear_object_data(ob)
+    ob.data.vertices.foreach_set("co", baked_coords[0])
+    _restore_modifier_stack(ob, stack_snapshots, selected_mods, keep_armatures)
+    _restore_shape_keys(ob, metadata, baked_coords)
+
+
+# ------------------------------------------------------------------------------
+# ARMATURE OPERATIONS
+# ------------------------------------------------------------------------------
 
 
 def apply_armature_rest_pose(context: bpy.types.Context, arm: bpy.types.Object) -> None:

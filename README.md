@@ -1,44 +1,11 @@
-# Apply Modifiers (v1.0.0)
+# Slategray Blender Tools
 
-A high-performance Blender addon designed to bake modifiers into a mesh while preserving all shape key data. Optimized for **Blender 5.0+** using NumPy vectorization and advanced dependency graph management.
+This collection of high-performance tools handles complex mesh and rigging workflows in Blender that default tools often struggle with. The focus is on speed and data integrity, using NumPy to handle vertex data and modifier stacks efficiently.
 
-## Features
+## Core Features
 
-- **High-Performance Extraction**: Features an $O(N)$ shape key extraction algorithm that minimizes RNA property overhead.
-- **Efficient Updates**: Uses targeted dependency graph updates instead of full scene evaluations to maximize speed in complex scenes.
-- **Multi-Object Support**: Batch-process modifiers across multiple selected mesh objects with individual selection control.
-- **Vectorized Performance**: Uses C-level data transfer via NumPy to bypass Python interpreter bottlenecks.
-- **Shape Key Preservation**: Bakes the modifier stack while maintaining all shape key geometry, names, relative references, and vertex groups.
-- **Topology Safety**: Automatically verifies vertex count consistency across shape key states during evaluation.
-- **Selective Baking**: Choose exactly which modifiers to bake from the stack per object.
-- **Safety Warnings**: Detects and warns when Armatures are selected to prevent accidental pose baking.
+### Apply Modifiers
+This tool bakes modifiers while preserving shape keys. It uses NumPy vectorization to capture vertex coordinates across all shape states, wipes the modifier stack, and reconstructs the mesh and shape keys from the snapshots. This is essential for character pipelines where the stack must be flattened without losing facial expressions.
 
-## Installation
-
-1. Download `ApplyModifiers.py`.
-2. In Blender, go to `Edit > Preferences > Add-ons > Install...`.
-3. Select the file and enable **Object: Apply Modifiers**.
-
-## Usage
-
-1. Select one or more mesh objects with modifiers and shape keys.
-2. Locate the tool in the **Sidebar (N-panel) > Tool > Apply Modifiers**.
-3. Alternatively, find it in the **Object Context Menu** (Right-Click in Object Mode).
-4. In the popup dialogue, toggle the modifiers you wish to bake for each selected object.
-5. Click **Apply Modifiers**.
-
-## Development
-
-This project uses modern Python tooling for code quality:
-- **Ruff**: For linting and formatting.
-- **Basedpyright**: For static type checking with Blender API stubs.
-
-To set up the development environment:
-```powershell
-pip install -r dev-requirements.txt
-```
-
-## License
-
-Copyright (c) 2026 Randall Rosas (Slategray).  
-This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
+### Apply Rest Pose
+This tool performs a one-click sync between a rig's pose and its rest state. It captures the mesh in its current deformed state, resets the armature's rest pose to match the current pose, and then re-applies the mesh data so nothing shifts.

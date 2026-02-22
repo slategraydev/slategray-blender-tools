@@ -1,7 +1,7 @@
 [project]
-name = "apply-modifiers"
+name = "slategray-blender-tools"
 version = "1.0.0"
-description = "High-performance Blender addon to bake modifiers while preserving shape keys"
+description = "A collection of high-performance Blender tools developed by Slategray"
 authors = [
     { name = "Randall Rosas (Slategray)" }
 ]
@@ -39,7 +39,7 @@ ignore = [
     "D104", # Missing docstring in public package
     "D203", # 1 blank line required before class docstring
     "D213", # Multi-line docstring summary should start at the second line
-    "N801", # Class name convention (Blender uses MSK_OT_...)
+    "N801", # Class name convention (Blender uses SBT_OT_...)
     "N806", # Variable in function name (Blender operators use self.layout)
     "PLR0913", # Too many arguments
     "PLR0912", # Too many branches
