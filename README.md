@@ -7,7 +7,8 @@ A high-performance Blender addon designed to bake modifiers into a mesh while pr
 - **Vectorized Performance**: Uses C-level data transfer via NumPy to bypass Python interpreter bottlenecks.
 - **Shape Key Preservation**: Bakes the modifier stack while maintaining all shape key geometry, names, relative references, and vertex groups.
 - **Topology Safety**: Automatically verifies vertex count consistency across shape key states during evaluation.
-- **Armature Isolation**: Optional toggle to hide armatures during baking to maintain base mesh topology.
+- **Selective Baking**: Choose exactly which modifiers to bake from the stack.
+- **Safety Warnings**: Detects and warns when Armatures are selected to prevent accidental pose baking.
 
 ## Installation
 

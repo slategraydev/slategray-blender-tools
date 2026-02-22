@@ -103,17 +103,11 @@ def _rebuild_geometry_stack(
 def _configure_stack_visibility(
     ob: bpy.types.Object,
     target_modifiers: list[str],
-    ignore_armatures: bool,
 ) -> dict[str, bool]:
     """Configure modifier visibility and return original state."""
     original_vis = {m.name: m.show_viewport for m in ob.modifiers}
     for m in ob.modifiers:
-        if m.name in target_modifiers:
-            m.show_viewport = True
-        elif ignore_armatures and m.type == "ARMATURE":
-            m.show_viewport = False
-        else:
-            m.show_viewport = False
+        m.show_viewport = m.name in target_modifiers
     return original_vis
 
 
@@ -134,7 +128,6 @@ def _bake_and_rebuild(
 def _execute_vectorized_bake(
     context: bpy.types.Context,
     target_modifiers: list[str],
-    ignore_armatures: bool,
 ) -> tuple[bool, str | None]:
     """Orchestrates the high-performance bake pipeline."""
     ob = context.object
@@ -155,7 +148,7 @@ def _execute_vectorized_bake(
         for kb in mesh_data.shape_keys.key_blocks
     ]
 
-    original_vis = _configure_stack_visibility(ob, target_modifiers, ignore_armatures)
+    original_vis = _configure_stack_visibility(ob, target_modifiers)
     original_state = [(kb.value, kb.mute) for kb in mesh_data.shape_keys.key_blocks]
 
     try:
@@ -187,10 +180,6 @@ class MSK_OT_BakeVectorized(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     modifier_list: CollectionProperty(type=bpy.types.PropertyGroup)  # type: ignore
-    hide_armatures: BoolProperty(  # type: ignore
-        name="Ignore Armatures",
-        default=True,
-    )
 
     def execute(self, context: bpy.types.Context) -> set[str]:
         """Run vectorized bake execution."""
@@ -198,7 +187,7 @@ class MSK_OT_BakeVectorized(bpy.types.Operator):
         if not selected:
             return {"CANCELLED"}
 
-        success, error = _execute_vectorized_bake(context, selected, self.hide_armatures)
+        success, error = _execute_vectorized_bake(context, selected)
         if not success:
             self.report({"ERROR"}, error if error else "Bake failed.")
             return {"CANCELLED"}
@@ -207,12 +196,24 @@ class MSK_OT_BakeVectorized(bpy.types.Operator):
 
     def draw(self, context: bpy.types.Context) -> None:
         """Render dialogue."""
+        ob = context.object
         layout = self.layout
         layout.label(text="Baking selected modifiers...")
+
         box = layout.box()
+        armature_selected = False
         for item in self.modifier_list:
+            mod = ob.modifiers.get(item.name)
+            if not mod:
+                continue
             box.label(text=item.name, icon="MODIFIER")
-        layout.prop(self, "hide_armatures")
+            if mod.type == "ARMATURE":
+                armature_selected = True
+
+        if armature_selected:
+            col = layout.column(align=True)
+            col.label(text="Warning: Armature selected.", icon="ERROR")
+            col.label(text="This will bake the current pose.")
 
     def invoke(self, context: bpy.types.Context, _event: bpy.types.Event) -> set[str]:
         """Initialization."""
@@ -220,8 +221,7 @@ class MSK_OT_BakeVectorized(bpy.types.Operator):
             return {"CANCELLED"}
         self.modifier_list.clear()
         for mod in context.object.modifiers:
-            if mod.show_viewport:
-                self.modifier_list.add().name = mod.name
+            self.modifier_list.add().name = mod.name
         return context.window_manager.invoke_props_dialog(self)
 
 
