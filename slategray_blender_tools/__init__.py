@@ -8,7 +8,7 @@ import importlib
 import sys
 
 from . import ui
-from .modules import apply_modifiers, apply_rest_pose, clean_vertex_groups
+from .modules import apply_modifiers, apply_rest_pose, clean_vertex_groups, transfer_shape_keys
 
 # ------------------------------------------------------------------------------
 # ADDON METADATA
@@ -34,6 +34,7 @@ MODULE_NAMES = (
     "modules.apply_modifiers",
     "modules.apply_rest_pose",
     "modules.clean_vertex_groups",
+    "modules.transfer_shape_keys",
 )
 
 if "bpy" in sys.modules:
@@ -52,6 +53,7 @@ MODULES = (
     apply_modifiers,
     apply_rest_pose,
     clean_vertex_groups,
+    transfer_shape_keys,
 )
 
 

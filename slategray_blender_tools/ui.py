@@ -26,6 +26,7 @@ class SBT_PT_SidebarPanel(bpy.types.Panel):
         col = layout.column(align=True)
         col.label(text="Mesh Tools")
         col.operator("object.sbt_apply_modifiers", icon="MODIFIER")
+        col.operator("object.sbt_transfer_shape_keys", icon="SHAPEKEY_DATA")
         col.operator("object.sbt_clean_vertex_groups", icon="GROUP_VERTEX")
 
         col.separator()
