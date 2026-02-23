@@ -11,16 +11,24 @@ import numpy as np
 from bpy.props import IntProperty, StringProperty  # type: ignore
 from mathutils import kdtree  # type: ignore
 
+# Constants
+EPSILON = 1e-6
+MIN_MESH_COUNT = 2
+
 # ------------------------------------------------------------------------------
 # NUMPY UTILITIES
 # ------------------------------------------------------------------------------
 
 
 def apply_matrix_numpy(coords, matrix):
-    """Apply a 4x4 matrix to (N, 3) coordinates."""
-    mat_np = np.array(matrix).reshape(4, 4)
-    homog = np.c_[coords, np.ones(coords.shape[0])]
-    return (homog @ mat_np.T)[:, :3]
+    """Apply a 4x4 matrix to coordinates. Supports (N, 3) or (K, N, 3)."""
+    mat_np = np.array(matrix, dtype=np.float32).reshape(4, 4)
+    mat_3x3 = mat_np[:3, :3]
+    translation = mat_np[:3, 3]
+
+    # Vectorized (SIMD) transformation without homogenous coordinate expansion
+    # This avoids doubling memory and allows direct register utilization.
+    return (coords @ mat_3x3.T) + translation
 
 
 def apply_matrix_to_normals(normals, matrix):
@@ -28,17 +36,29 @@ def apply_matrix_to_normals(normals, matrix):
     mat_3x3 = np.array(matrix).reshape(4, 4)[:3, :3]
     new_normals = normals @ mat_3x3.T
     norms = np.linalg.norm(new_normals, axis=1, keepdims=True)
-    return new_normals / np.where(norms > 1e-6, norms, 1.0)
+    return new_normals / np.where(norms > EPSILON, norms, 1.0)
 
 
 def get_adjacency(mesh):
-    """Generate adjacency list for Laplacian smoothing."""
+    """Generate dense adjacency map for 4D tensor smoothing."""
+    # Build list of neighbor sets
     adj = [set() for _ in range(len(mesh.vertices))]
     for edge in mesh.edges:
         u, v = edge.vertices
         adj[u].add(v)
         adj[v].add(u)
-    return [list(neighbors) for neighbors in adj]
+
+    # Convert to dense map with padding
+    counts = np.array([len(neighbors) for neighbors in adj], dtype=np.float32).reshape(-1, 1)
+    max_valence = int(np.max(counts))
+
+    # Pad with 0, but counts will handle the math
+    adj_map = np.zeros((len(mesh.vertices), max_valence), dtype=np.int32)
+    for i, neighbors in enumerate(adj):
+        if neighbors:
+            adj_map[i, : len(neighbors)] = list(neighbors)
+
+    return adj_map, counts
 
 
 # ------------------------------------------------------------------------------
@@ -75,7 +95,23 @@ class SBT_OT_TransferShapeKeys(bpy.types.Operator):
             self.report({"WARNING"}, "Objects not found.")
             return {"CANCELLED"}
 
-        # 1. Capture Source (Body) Data
+        # 1. Prepare Data
+        prep_data = self._prepare_data(source_obj, target_obj)
+
+        # 2. Process Shape Keys
+        total_transferred = self._process_shape_keys(source_obj, target_obj, prep_data)
+
+        # Reset both objects to Basis shape key (index 0)
+        source_obj.active_shape_key_index = 0
+        target_obj.active_shape_key_index = 0
+
+        self.report({"INFO"}, f"Transferred {total_transferred} keys with Surface Anchoring.")
+        print(f"Transfer Shape Keys: Finished in {time.time() - timer_start:.4f}s")
+        return {"FINISHED"}
+
+    def _prepare_data(self, source_obj: bpy.types.Object, target_obj: bpy.types.Object) -> dict:
+        """Capture and map data between meshes."""
+        # Source (Body) Data
         source_mesh = source_obj.data
         source_keys = source_mesh.shape_keys.key_blocks
         source_vert_count = len(source_mesh.vertices)
@@ -87,23 +123,22 @@ class SBT_OT_TransferShapeKeys(bpy.types.Operator):
         source_local_basis.shape = (source_vert_count, 3)
         source_world_basis = apply_matrix_numpy(source_local_basis, source_matrix)
 
-        # Get Source Normals for World Space projection
+        # Get Source Normals
         source_local_normals = np.empty(source_vert_count * 3, dtype=np.float32)
         source_mesh.vertices.foreach_get("normal", source_local_normals)
         source_local_normals.shape = (source_vert_count, 3)
         source_world_normals = apply_matrix_to_normals(source_local_normals, source_matrix)
 
-        # 2. Build KDTree (World Space)
+        # Build KDTree
         kd = kdtree.KDTree(source_vert_count)
         for i, co in enumerate(source_world_basis):
             kd.insert(co, i)
         kd.balance()
 
-        # 3. Capture Target (Clothing) Data
+        # Target (Clothing) Data
         target_mesh = target_obj.data
         target_vert_count = len(target_mesh.vertices)
         target_matrix = target_obj.matrix_world
-        target_matrix_inv = target_matrix.inverted()
 
         if not target_mesh.shape_keys:
             target_obj.shape_key_add(name="Basis")
@@ -113,90 +148,119 @@ class SBT_OT_TransferShapeKeys(bpy.types.Operator):
         target_local_basis.shape = (target_vert_count, 3)
         target_world_basis = apply_matrix_numpy(target_local_basis, target_matrix)
 
-        # 4. Surface Mapping (1-Nearest Neighbor for 1:1 Magnitude)
+        # Surface Mapping
         mapping = np.array([kd.find(co)[1] for co in target_world_basis], dtype=np.int32)
 
-        # 5. Profiling: Calculate Basis Clearance
+        # Calculate Basis Clearance
         mapped_basis_points = source_world_basis[mapping]
         mapped_basis_normals = source_world_normals[mapping]
 
         basis_offset = target_world_basis - mapped_basis_points
-        # The exact distance from the skin along the skin's normal
         basis_clearance = np.sum(basis_offset * mapped_basis_normals, axis=1, keepdims=True)
 
-        # 6. Adjacency for Smoothing
-        adjacency = get_adjacency(target_mesh) if self.smooth_iterations > 0 else []
+        # Adjacency for Smoothing
+        adj_map, counts = get_adjacency(target_mesh) if self.smooth_iterations > 0 else (None, None)
 
-        # 7. Process Shape Keys
-        total_transferred = 0
-        source_local_shape = np.empty(source_vert_count * 3, dtype=np.float32)
+        return {
+            "source_keys": source_keys,
+            "source_vert_count": source_vert_count,
+            "source_matrix": source_matrix,
+            "source_ref_key": source_ref_key,
+            "source_world_basis": source_world_basis,
+            "target_mesh": target_mesh,
+            "target_matrix": target_matrix,
+            "target_world_basis": target_world_basis,
+            "mapping": mapping,
+            "mapped_basis_normals": mapped_basis_normals,
+            "basis_clearance": basis_clearance,
+            "adj_map": adj_map,
+            "neighbor_counts": counts,
+        }
 
-        for kb in source_keys:
-            if kb == source_ref_key:
-                continue
+    def _process_shape_keys(
+        self, source_obj: bpy.types.Object, target_obj: bpy.types.Object, prep: dict
+    ) -> int:
+        """Iterate and transfer all shape keys using batch 3D/4D tensor logic."""
+        source_vert_count = prep["source_vert_count"]
+        source_matrix = prep["source_matrix"]
+        source_ref_key = prep["source_ref_key"]
 
-            # Extract body shape
-            kb.data.foreach_get("co", source_local_shape)
-            source_local_shape.shape = (source_vert_count, 3)
-            source_world_shape = apply_matrix_numpy(source_local_shape, source_matrix)
+        # Collect all source keys into a 3D Tensor (K, V, 3)
+        valid_keys = [kb for kb in prep["source_keys"] if kb != source_ref_key]
+        if not valid_keys:
+            return 0
 
-            # World Delta (1:1 Movement)
-            world_deltas_full = source_world_shape - source_world_basis
-            interpolated_deltas = world_deltas_full[mapping]
+        key_count = len(valid_keys)
+        # All data must be C-Contiguous float32 for maximum L1 Cache hits
+        all_source_shapes = np.empty((key_count, source_vert_count, 3), dtype=np.float32, order="C")
 
-            # --- SMOOTHING PASS ---
-            if self.smooth_iterations > 0:
-                for _ in range(self.smooth_iterations):
-                    smooth_deltas = np.copy(interpolated_deltas)
-                    for i, neighbors in enumerate(adjacency):
-                        if neighbors:
-                            avg_neighbor_delta = np.mean(interpolated_deltas[neighbors], axis=0)
-                            smooth_deltas[i] = (interpolated_deltas[i] + avg_neighbor_delta) / 2.0
-                    interpolated_deltas = smooth_deltas
+        for i, kb in enumerate(valid_keys):
+            kb.data.foreach_get("co", all_source_shapes[i].ravel())
 
-            # --- AUTOMATED SURFACE ANCHORING ---
-            # Enforce that the clothing stays at its original 'hover' height relative to the skin.
-            target_world_new_raw = target_world_basis + interpolated_deltas
-            mapped_new_points = source_world_shape[mapping]
+        # Fully Vectorized Matrix Application (No loops)
+        # This triggers NumPy's internal multi-threaded BLAS/MKL and SIMD extensions
+        all_world_shapes = apply_matrix_numpy(all_source_shapes, source_matrix)
 
-            # Current distance to the deformed skin
-            new_offset = target_world_new_raw - mapped_new_points
-            new_clearance = np.sum(new_offset * mapped_basis_normals, axis=1, keepdims=True)
+        # Vectorized Interpolation (K, V, 3)
+        # World Delta = Body[New] - Body[Basis]
+        world_deltas_full = all_world_shapes - prep["source_world_basis"]
+        # Map body vertex deltas to clothing vertices
+        interpolated_deltas = world_deltas_full[:, prep["mapping"]]
 
-            # Anti-Clipping: If it dipped below the original clearance, push it back.
-            # We add a tiny 0.1mm epsilon to guarantee coverage.
-            clipping_mask = (new_clearance < basis_clearance).flatten()
-            if np.any(clipping_mask):
-                correction = (
-                    basis_clearance[clipping_mask] - new_clearance[clipping_mask]
-                ) + 0.0001
-                interpolated_deltas[clipping_mask] += (
-                    mapped_basis_normals[clipping_mask] * correction
-                )
+        # --- TENSORIZED SMOOTHING (4D GATHER) ---
+        if self.smooth_iterations > 0:
+            # Contiguous Index Set for TLB hit maximization
+            adj_map = np.ascontiguousarray(prep["adj_map"])
+            counts = prep["neighbor_counts"]
 
-            # Finalize positions
-            target_world_final = target_world_basis + interpolated_deltas
-            target_local_final = apply_matrix_numpy(target_world_final, target_matrix_inv)
+            for _ in range(self.smooth_iterations):
+                # 4D Tensor Gather (K, V, MAX_VALENCE, 3)
+                neighbor_deltas = interpolated_deltas[:, adj_map]
 
-            # Inject Shape Key
+                # SIMD: Masked Sum without branching
+                mask = np.arange(adj_map.shape[1]) < counts
+                mask = mask.astype(np.float32).reshape(1, -1, adj_map.shape[1], 1)
+
+                sum_neighbor_deltas = np.sum(neighbor_deltas * mask, axis=2)
+                mean_neighbor_deltas = sum_neighbor_deltas / counts
+                interpolated_deltas = (interpolated_deltas + mean_neighbor_deltas) / 2.0
+
+        # --- TENSORIZED SURFACE ANCHORING (3D BROADCAST) ---
+        target_world_new_raw = prep["target_world_basis"] + interpolated_deltas
+        # mapped_new_points = source_world_shape[mapping] -> (K, TV, 3)
+        mapped_new_points = all_world_shapes[:, prep["mapping"]]
+
+        new_offset = target_world_new_raw - mapped_new_points
+        # clearance = sum(offset * normals) -> (K, TV, 1)
+        new_clearance = np.sum(new_offset * prep["mapped_basis_normals"], axis=2, keepdims=True)
+
+        # Branchless Masked Correction (SIMD-Friendly)
+        # If it dipped below the original clearance, push it back.
+        correction_mask = (new_clearance < prep["basis_clearance"]).astype(np.float32)
+        diff = prep["basis_clearance"] - new_clearance + 0.0001
+        interpolated_deltas += correction_mask * diff * prep["mapped_basis_normals"]
+
+        # Fully Vectorized Inverse Transformation
+        target_matrix_inv = prep["target_matrix"].inverted()
+        target_world_final = prep["target_world_basis"] + interpolated_deltas
+        target_local_final = apply_matrix_numpy(target_world_final, target_matrix_inv)
+
+        # Inject back (Loop only for Blender API)
+        target_mesh = prep["target_mesh"]
+        for i, kb in enumerate(valid_keys):
             target_kb = target_mesh.shape_keys.key_blocks.get(kb.name)
             if not target_kb:
                 target_kb = target_obj.shape_key_add(name=kb.name)
 
             target_kb.value = 0.0
-            target_kb.data.foreach_set("co", target_local_final.ravel())
+            target_kb.data.foreach_set("co", target_local_final[i].ravel())
 
-            source_local_shape.shape = (source_vert_count * 3,)
-            total_transferred += 1
-
-        self.report({"INFO"}, f"Transferred {total_transferred} keys with Surface Anchoring.")
-        print(f"Transfer Shape Keys: Finished in {time.time() - timer_start:.4f}s")
-        return {"FINISHED"}
+        return key_count
 
     def invoke(self, context: bpy.types.Context, _event: bpy.types.Event) -> set[str]:
         """Auto-detect selection."""
         meshes = [obj for obj in context.selected_objects if obj.type == "MESH"]
-        if len(meshes) < 2:
+        if len(meshes) < MIN_MESH_COUNT:
             self.report({"WARNING"}, "Select Body then Clothing.")
             return {"CANCELLED"}
 
