@@ -8,6 +8,8 @@ import time
 
 import bpy  # type: ignore
 
+from ..utils import get_empty_vertex_group_indices
+
 # ------------------------------------------------------------------------------
 # OPERATOR LOGIC
 # ------------------------------------------------------------------------------
@@ -31,20 +33,10 @@ class SBT_OT_CleanVertexGroups(bpy.types.Operator):
 
         total_removed = 0
         for obj in selected_meshes:
-            # Identify used vertex group indices
-            used_indices = set()
-            for v in obj.data.vertices:
-                for g in v.groups:
-                    if g.weight > 0:
-                        used_indices.add(g.group)
+            empty_indices = get_empty_vertex_group_indices(obj)
+            to_remove = [vg for vg in obj.vertex_groups if vg.index in empty_indices]
 
-            # Find empty groups (reverse order for safe removal)
-            to_remove = []
-            for vg in obj.vertex_groups:
-                if vg.index not in used_indices:
-                    to_remove.append(vg)
-
-            for vg in reversed(to_remove):
+            for vg in sorted(to_remove, key=lambda x: x.index, reverse=True):
                 obj.vertex_groups.remove(vg)
                 total_removed += 1
 

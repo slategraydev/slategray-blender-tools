@@ -9,7 +9,7 @@ import time
 import bpy  # type: ignore
 from bpy.props import BoolProperty, CollectionProperty, StringProperty  # type: ignore
 
-from ..utils import capture_mesh_snapshot, get_modifier_snapshot, restore_object
+from ..utils import bake_mesh_operation
 
 # ------------------------------------------------------------------------------
 # DATA TYPES
@@ -39,7 +39,7 @@ class SBT_OT_ApplyModifiers(bpy.types.Operator):
     modifier_items: CollectionProperty(type=SBT_ModifierItem)  # type: ignore
 
     def execute(self, context: bpy.types.Context) -> set[str]:
-        """Apply selected modifiers to the selection."""
+        """Apply selected modifiers using the centralized bake pipeline."""
         timer_start = time.time()
         groups: dict[str, list[str]] = {}
 
@@ -59,19 +59,14 @@ class SBT_OT_ApplyModifiers(bpy.types.Operator):
             if not ob:
                 continue
 
-            snaps = [get_modifier_snapshot(m) for m in ob.modifiers]
             context.view_layer.objects.active = ob
-            meta, coords = capture_mesh_snapshot(ob, context)
-            if meta is None or coords is None:
-                continue
-
-            restore_object(ob, meta, coords, snaps, sel_mods, False)
+            bake_mesh_operation(context, ob, sel_mods, False)
 
         context.view_layer.objects.active = orig_active
         for o in orig_selected:
             o.select_set(True)
 
-        print(f"Apply Modifiers: Bake finished in {time.time() - timer_start:.4f}s")
+        print(f"Apply Modifiers: Finished in {time.time() - timer_start:.4f}s")
         return {"FINISHED"}
 
     def invoke(self, context: bpy.types.Context, _event: bpy.types.Event) -> set[str]:

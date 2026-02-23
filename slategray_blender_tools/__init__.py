@@ -7,7 +7,7 @@
 import importlib
 import sys
 
-from . import ui
+from . import ui, utils
 from .modules import apply_modifiers, apply_rest_pose, clean_vertex_groups, transfer_shape_keys
 
 # ------------------------------------------------------------------------------
@@ -59,16 +59,12 @@ MODULES = (
 
 def register() -> None:
     """Register all modular components."""
-    for mod in MODULES:
-        if hasattr(mod, "register"):
-            mod.register()
+    utils.register_modules(MODULES)
 
 
 def unregister() -> None:
     """Unregister all modular components."""
-    for mod in reversed(MODULES):
-        if hasattr(mod, "unregister"):
-            mod.unregister()
+    utils.unregister_modules(MODULES)
 
 
 if __name__ == "__main__":
