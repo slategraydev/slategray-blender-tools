@@ -66,6 +66,7 @@ class SBT_OT_ApplyModifiers(bpy.types.Operator):
         for o in orig_selected:
             o.select_set(True)
 
+        self.report({"INFO"}, "Selected modifiers applied successfully.")
         print(f"Apply Modifiers: Finished in {time.time() - timer_start:.4f}s")
         return {"FINISHED"}
 

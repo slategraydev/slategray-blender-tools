@@ -54,6 +54,7 @@ class SBT_OT_ApplyRestPose(bpy.types.Operator):
         for o in orig_selected:
             o.select_set(True)
 
+        self.report({"INFO"}, "Rest pose applied to rig and meshes.")
         print(f"Apply Rest Pose: Finished in {time.time() - timer_start:.4f}s")
         return {"FINISHED"}
 
