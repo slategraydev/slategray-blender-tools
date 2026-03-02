@@ -7,9 +7,6 @@
 import importlib
 import sys
 
-from . import ui, utils
-from .modules import apply_modifiers, apply_rest_pose, clean_vertex_groups, transfer_shape_keys
-
 # ------------------------------------------------------------------------------
 # ADDON METADATA
 # ------------------------------------------------------------------------------
@@ -29,12 +26,19 @@ bl_info = {
 # ------------------------------------------------------------------------------
 
 MODULE_NAMES = (
+    "utils.lifecycle",
+    "utils.performance",
+    "utils.mesh",
+    "utils.rigging",
+    "utils.ui",
     "utils",
+    "props",
     "ui",
     "modules.apply_modifiers",
     "modules.apply_rest_pose",
     "modules.clean_vertex_groups",
     "modules.transfer_shape_keys",
+    "modules.merge_vertex_groups",
 )
 
 if "bpy" in sys.modules:
@@ -43,17 +47,32 @@ if "bpy" in sys.modules:
         if full_name in sys.modules:
             importlib.reload(sys.modules[full_name])
 
+# ------------------------------------------------------------------------------
+# CORE IMPORTS (AFTER RELOAD)
+# ------------------------------------------------------------------------------
+
+from . import props, ui, utils  # noqa: E402
+from .modules import (  # noqa: E402
+    apply_modifiers,
+    apply_rest_pose,
+    clean_vertex_groups,
+    merge_vertex_groups,
+    transfer_shape_keys,
+)
 
 # ------------------------------------------------------------------------------
 # REGISTRATION
 # ------------------------------------------------------------------------------
 
 MODULES = (
+    utils.ui,
+    props,
     ui,
     apply_modifiers,
     apply_rest_pose,
     clean_vertex_groups,
     transfer_shape_keys,
+    merge_vertex_groups,
 )
 
 

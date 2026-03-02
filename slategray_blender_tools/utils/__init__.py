@@ -4,12 +4,13 @@
 
 """Package initialization for Slategray Blender Tools utilities."""
 
-from .lifecycle import (
-    register_modules as register_modules,
-)
-from .lifecycle import (
-    unregister_modules as unregister_modules,
-)
+from . import lifecycle as lifecycle
+from . import mesh as mesh
+from . import performance as performance
+from . import rigging as rigging
+from . import ui as ui
+from .lifecycle import register_modules as register_modules
+from .lifecycle import unregister_modules as unregister_modules
 from .mesh import (
     bake_mesh_operation as bake_mesh_operation,
 )
@@ -18,6 +19,9 @@ from .mesh import (
 )
 from .mesh import (
     extract_mesh_data as extract_mesh_data,
+)
+from .mesh import (
+    force_object_mode as force_object_mode,
 )
 from .mesh import (
     get_modifier_snapshot as get_modifier_snapshot,
@@ -42,4 +46,16 @@ from .performance import (
 )
 from .rigging import (
     apply_armature_rest_pose as apply_armature_rest_pose,
+)
+from .rigging import (
+    apply_vertex_group_weights as apply_vertex_group_weights,
+)
+from .rigging import (
+    capture_vertex_group_weights as capture_vertex_group_weights,
+)
+from .ui import (
+    SBT_GroupItem as SBT_GroupItem,
+)
+from .ui import (
+    SBT_OT_UITrigger as SBT_OT_UITrigger,
 )

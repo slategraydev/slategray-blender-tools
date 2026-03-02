@@ -30,6 +30,12 @@ SHAPE_ATTRIBUTES = (
 # ------------------------------------------------------------------------------
 
 
+def force_object_mode() -> None:
+    """Ensure Blender is in Object Mode."""
+    if bpy.context.object and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+
 def extract_mesh_data(
     ob: bpy.types.Object,
     context: bpy.types.Context,

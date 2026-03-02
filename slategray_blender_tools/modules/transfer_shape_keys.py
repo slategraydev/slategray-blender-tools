@@ -8,14 +8,20 @@ import time
 
 import bpy  # type: ignore
 import numpy as np
-from bpy.props import IntProperty, StringProperty  # type: ignore
+from bpy.props import EnumProperty, IntProperty  # type: ignore
 from mathutils import kdtree  # type: ignore
 
-from ..utils import apply_matrix_numpy, apply_matrix_to_normals, get_adjacency, smooth_deltas_tiled
+from ..props import update_selection
+from ..utils import (
+    apply_matrix_numpy,
+    apply_matrix_to_normals,
+    force_object_mode,
+    get_adjacency,
+    smooth_deltas_tiled,
+)
 
 # Constants
 EPSILON = 1e-6
-MIN_MESH_COUNT = 2
 
 # ------------------------------------------------------------------------------
 # OPERATOR LOGIC
@@ -23,36 +29,43 @@ MIN_MESH_COUNT = 2
 
 
 class SBT_OT_TransferShapeKeys(bpy.types.Operator):
-    """Transfer ALL shape keys with automated surface anchoring and anti-clipping."""
+    """Transfer ALL shape keys using scene settings."""
 
     bl_idname = "object.sbt_transfer_shape_keys"
     bl_label = "Transfer Shape Keys"
     bl_options = {"REGISTER", "UNDO"}
 
-    source_name: StringProperty(name="Source (Body)")  # type: ignore
-    target_name: StringProperty(name="Target (Clothing)")  # type: ignore
-
-    smooth_iterations: IntProperty(
-        name="Smoothing Passes",
-        default=5,
-        min=0,
-        max=50,
-        description="Number of smoothing iterations. Anti-clipping is handled automatically",
-    )  # type: ignore
-
     def execute(self, context: bpy.types.Context) -> set[str]:
-        """Perform surface-anchored delta mapping."""
+        """Perform surface-anchored delta mapping using scene properties."""
         timer_start = time.time()
+        settings = context.scene.sbt_shape_key_transfer
 
-        source_obj = bpy.data.objects.get(self.source_name)
-        target_obj = bpy.data.objects.get(self.target_name)
+        source_obj = settings.source_obj
+        target_obj = settings.target_obj
 
         if not source_obj or not target_obj:
             self.report({"WARNING"}, "Objects not found.")
             return {"CANCELLED"}
 
-        prep_data = self._prepare_data(source_obj, target_obj)
-        total_transferred = self._process_shape_keys(source_obj, target_obj, prep_data)
+        force_object_mode()
+
+        # Determine masking
+        mask_indices = set()
+        if settings.target_ignored:
+            for item in settings.target_ignored:
+                vg = target_obj.vertex_groups.get(item.name)
+                if vg:
+                    for v in target_obj.data.vertices:
+                        try:
+                            if vg.weight(v.index) > EPSILON:
+                                mask_indices.add(v.index)
+                        except RuntimeError:
+                            pass
+
+        prep_data = self._prepare_data(source_obj, target_obj, settings.smooth_iterations)
+        total_transferred = self._process_shape_keys(
+            source_obj, target_obj, prep_data, mask_indices, settings.smooth_iterations
+        )
 
         source_obj.active_shape_key_index = 0
         target_obj.active_shape_key_index = 0
@@ -61,7 +74,9 @@ class SBT_OT_TransferShapeKeys(bpy.types.Operator):
         print(f"Transfer Shape Keys: Finished in {time.time() - timer_start:.4f}s")
         return {"FINISHED"}
 
-    def _prepare_data(self, source_obj: bpy.types.Object, target_obj: bpy.types.Object) -> dict:
+    def _prepare_data(
+        self, source_obj: bpy.types.Object, target_obj: bpy.types.Object, smooth_iterations: int
+    ) -> dict:
         """Capture and map data between meshes."""
         source_mesh = source_obj.data
         source_keys = source_mesh.shape_keys.key_blocks
@@ -104,7 +119,7 @@ class SBT_OT_TransferShapeKeys(bpy.types.Operator):
         basis_offset = target_world_basis - mapped_basis_points
         basis_clearance = np.sum(basis_offset * mapped_basis_normals, axis=1, keepdims=True)
 
-        adj_map, counts = get_adjacency(target_mesh) if self.smooth_iterations > 0 else (None, None)
+        adj_map, counts = get_adjacency(target_mesh) if smooth_iterations > 0 else (None, None)
 
         return {
             "source_keys": source_keys,
@@ -123,7 +138,12 @@ class SBT_OT_TransferShapeKeys(bpy.types.Operator):
         }
 
     def _process_shape_keys(
-        self, source_obj: bpy.types.Object, target_obj: bpy.types.Object, prep: dict
+        self,
+        source_obj: bpy.types.Object,
+        target_obj: bpy.types.Object,
+        prep: dict,
+        mask_indices: set[int],
+        smooth_iterations: int,
     ) -> int:
         """Iterate and transfer all shape keys using batch 3D/4D tensor logic."""
         source_vert_count = prep["source_vert_count"]
@@ -144,12 +164,9 @@ class SBT_OT_TransferShapeKeys(bpy.types.Operator):
         world_deltas_full = all_world_shapes - prep["source_world_basis"]
         interpolated_deltas = world_deltas_full[:, prep["mapping"]]
 
-        if self.smooth_iterations > 0:
+        if smooth_iterations > 0:
             interpolated_deltas = smooth_deltas_tiled(
-                interpolated_deltas,
-                prep["adj_map"],
-                prep["neighbor_counts"],
-                self.smooth_iterations,
+                interpolated_deltas, prep["adj_map"], prep["neighbor_counts"], smooth_iterations
             )
 
         target_world_new_raw = prep["target_world_basis"] + interpolated_deltas
@@ -162,6 +179,11 @@ class SBT_OT_TransferShapeKeys(bpy.types.Operator):
         diff = prep["basis_clearance"] - new_clearance + 0.0001
         interpolated_deltas += correction_mask * diff * prep["mapped_basis_normals"]
 
+        if mask_indices:
+            mask = np.zeros((prep["target_world_basis"].shape[0], 1), dtype=np.float32)
+            mask[list(mask_indices)] = 1.0
+            interpolated_deltas *= mask
+
         target_matrix_inv = prep["target_matrix"].inverted()
         target_world_final = prep["target_world_basis"] + interpolated_deltas
         target_local_final = apply_matrix_numpy(target_world_final, target_matrix_inv)
@@ -171,41 +193,59 @@ class SBT_OT_TransferShapeKeys(bpy.types.Operator):
             target_kb = target_mesh.shape_keys.key_blocks.get(kb.name)
             if not target_kb:
                 target_kb = target_obj.shape_key_add(name=kb.name)
-
             target_kb.value = 0.0
             target_kb.data.foreach_set("co", target_local_final[i].ravel())
 
         return key_count
 
-    def invoke(self, context: bpy.types.Context, _event: bpy.types.Event) -> set[str]:
-        """Auto-detect selection."""
-        meshes = [obj for obj in context.selected_objects if obj.type == "MESH"]
-        if len(meshes) < MIN_MESH_COUNT:
-            self.report({"WARNING"}, "Select Body then Clothing.")
-            return {"CANCELLED"}
 
-        active = context.view_layer.objects.active
-        if active and active.type == "MESH":
-            self.target_name = active.name
-            for m in meshes:
-                if m.name != self.target_name:
-                    self.source_name = m.name
-                    break
-        else:
-            self.source_name = meshes[0].name
-            self.target_name = meshes[1].name
+# ------------------------------------------------------------------------------
+# UI CONTROL OPERATORS
+# ------------------------------------------------------------------------------
 
-        return context.window_manager.invoke_props_dialog(self)
 
-    def draw(self, context: bpy.types.Context) -> None:
-        """Render UI."""
-        layout = self.layout
-        layout.prop_search(self, "source_name", bpy.data, "objects", text="Source (Body)")
-        layout.prop_search(self, "target_name", bpy.data, "objects", text="Target (Clothing)")
+class SBT_OT_ShapeKeyTransferUI(bpy.types.Operator):
+    """Manage Shape Key Transfer UI state."""
 
-        box = layout.box()
-        box.label(text="Options", icon="MOD_SHRINKWRAP")
-        box.prop(self, "smooth_iterations", text="Smoothing Passes")
+    bl_idname = "object.sbt_shape_key_transfer_ui"
+    bl_label = "Shape Key Transfer UI"
+    bl_options = {"INTERNAL"}
+
+    action: EnumProperty(  # type: ignore
+        items=[
+            ("AUTO_DETECT", "Auto-Detect", ""),
+            ("INVERT_TARGET", "Invert Target", ""),
+            ("CLEAR_TARGET", "Clear Target", ""),
+            ("REMOVE_TARGET", "Remove Target", ""),
+        ]
+    )
+    index: IntProperty(default=-1)  # type: ignore
+
+    def _handle_invert(self, settings, target_obj, collection):
+        """Helper to invert a vertex group selection list."""
+        if target_obj:
+            ignored = {i.name for i in collection}
+            all_vgs = [vg.name for vg in target_obj.vertex_groups]
+            collection.clear()
+            for name in all_vgs:
+                if name not in ignored:
+                    collection.add().name = name
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        """Perform requested UI action."""
+        settings = context.scene.sbt_shape_key_transfer
+
+        if self.action == "AUTO_DETECT":
+            update_selection(settings)
+        elif self.action == "INVERT_TARGET":
+            self._handle_invert(settings, settings.target_obj, settings.target_ignored)
+        elif self.action == "CLEAR_TARGET":
+            settings.target_ignored.clear()
+        elif self.action == "REMOVE_TARGET":
+            if self.index >= 0:
+                settings.target_ignored.remove(self.index)
+
+        return {"FINISHED"}
 
 
 # ------------------------------------------------------------------------------
@@ -216,8 +256,10 @@ class SBT_OT_TransferShapeKeys(bpy.types.Operator):
 def register() -> None:
     """Register class."""
     bpy.utils.register_class(SBT_OT_TransferShapeKeys)
+    bpy.utils.register_class(SBT_OT_ShapeKeyTransferUI)
 
 
 def unregister() -> None:
     """Unregister class."""
+    bpy.utils.unregister_class(SBT_OT_ShapeKeyTransferUI)
     bpy.utils.unregister_class(SBT_OT_TransferShapeKeys)

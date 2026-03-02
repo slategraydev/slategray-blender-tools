@@ -175,3 +175,6 @@ cython_debug/
 
 # Agent configuration
 .agent/
+
+# Workspace tracking
+tasks/
