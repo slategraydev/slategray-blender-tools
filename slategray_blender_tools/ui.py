@@ -1,14 +1,15 @@
 # ------------------------------------------------------------------------------
-# Copyright (c) 2026 Randall Rosas (Slategray)
+# Copyright (c) 2026 Randall Rosas (Slategray). All rights reserved.
 # ------------------------------------------------------------------------------
 
 """UI Panel for the Slategray Blender Tools suite."""
 
 import bpy  # type: ignore
 
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
 # SIDEBAR UI
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
+# Primary interaction panel in the 3D View Sidebar.
 
 
 class SBT_PT_SidebarPanel(bpy.types.Panel):
@@ -35,6 +36,13 @@ class SBT_PT_SidebarPanel(bpy.types.Panel):
         col = layout.column(align=True)
         col.label(text="Rigging Tools")
         col.operator("object.sbt_apply_rest_pose", icon="POSE_HLT")
+        col.operator("object.sbt_apply_rest_pose_all", icon="ARMATURE_DATA")
+
+        # Scene Hygiene Section
+        layout.separator()
+        col = layout.column(align=True)
+        col.label(text="Scene Hygiene")
+        col.operator("object.sbt_purge_unused_data", icon="TRASH")
 
 
 class SBT_PT_ShapeKeyTransfer(bpy.types.Panel):
@@ -143,9 +151,10 @@ class SBT_PT_MergeVertexGroups(bpy.types.Panel):
         layout.operator("object.sbt_merge_vertex_groups", icon="AUTOMERGE_ON")
 
 
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
 # REGISTRATION
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
+# Register UI panels and sub-panels.
 
 
 def register() -> None:

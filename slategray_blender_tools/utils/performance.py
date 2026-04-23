@@ -120,10 +120,9 @@ def get_adjacency(mesh: bpy.types.Mesh) -> tuple[np.ndarray, np.ndarray]:
 
     edge_verts = np.empty(edge_count * 2, dtype=np.int32)
     mesh.edges.foreach_get("vertices", edge_verts)
-    edge_verts.shape = (edge_count, 2)
 
     adj = [set() for _ in range(vert_count)]
-    for u, v in edge_verts:
+    for u, v in edge_verts.reshape(edge_count, 2).tolist():
         adj[u].add(v)
         adj[v].add(u)
 

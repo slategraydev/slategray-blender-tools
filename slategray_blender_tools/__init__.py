@@ -1,5 +1,5 @@
 # ------------------------------------------------------------------------------
-# Copyright (c) 2026 Randall Rosas (Slategray)
+# Copyright (c) 2026 Randall Rosas (Slategray). All rights reserved.
 # ------------------------------------------------------------------------------
 
 """Entry point for Slategray Blender Tools."""
@@ -7,23 +7,25 @@
 import importlib
 import sys
 
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
 # ADDON METADATA
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
+# Configuration and identification for the Blender addon system.
 
 bl_info = {
     "name": "Slategray Blender Tools",
     "author": "Randall Rosas (Slategray)",
-    "blender": (3, 6, 0),
+    "blender": (5, 0, 0),
     "version": (1, 1, 0),
     "location": "3D View > Sidebar > SLATE",
     "description": "A modular tool suite for mesh and rigging workflows.",
     "category": "Object",
 }
 
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
 # DYNAMIC RELOADING
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
+# Handle hot-reloading of modules during development.
 
 MODULE_NAMES = (
     "utils.lifecycle",
@@ -39,6 +41,7 @@ MODULE_NAMES = (
     "modules.clean_vertex_groups",
     "modules.transfer_shape_keys",
     "modules.merge_vertex_groups",
+    "modules.purge_unused_data",
 )
 
 if "bpy" in sys.modules:
@@ -47,9 +50,10 @@ if "bpy" in sys.modules:
         if full_name in sys.modules:
             importlib.reload(sys.modules[full_name])
 
-# ------------------------------------------------------------------------------
-# CORE IMPORTS (AFTER RELOAD)
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
+# CORE IMPORTS
+# ~~~~~~~~~~~~~~~~
+# Load project modules after reload logic.
 
 from . import props, ui, utils  # noqa: E402
 from .modules import (  # noqa: E402
@@ -57,12 +61,14 @@ from .modules import (  # noqa: E402
     apply_rest_pose,
     clean_vertex_groups,
     merge_vertex_groups,
+    purge_unused_data,
     transfer_shape_keys,
 )
 
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
 # REGISTRATION
-# ------------------------------------------------------------------------------
+# ~~~~~~~~~~~~~~~~
+# Manage addon lifecycle and component registration.
 
 MODULES = (
     utils.ui,
@@ -73,6 +79,7 @@ MODULES = (
     clean_vertex_groups,
     transfer_shape_keys,
     merge_vertex_groups,
+    purge_unused_data,
 )
 
 
